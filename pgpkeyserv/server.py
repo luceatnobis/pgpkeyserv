@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # server.py
 
+import sys
 import socket
 
 from urllib.parse import urlparse, urlencode
 from urllib.request import urlopen
 
-from pgpkeyserv import exception
+from pgpkeyserv import exceptions
 from pgpkeyserv.packages.socks import socks
 
 socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5, "127.0.0.1", 9050)
@@ -28,9 +29,9 @@ class Server:
         scheme, netloc, path = urlparse(server)[0:3]
 
         if not scheme:
-            raise exception.SchemeNotProvided
+            raise exceptions.SchemeNotProvided
         elif scheme not in allowed_schemes:
-            raise exception.SchemeNotAllowed(scheme)
+            raise exceptions.SchemeNotAllowed(scheme)
 
         scheme = scheme_translation.get(scheme, scheme)
 
@@ -64,7 +65,7 @@ class Server:
         """
         keyid_prefix = "0x"
         if not keyid.startswith(keyid_prefix):
-            raise exception.InvalidKeyID(keyid)
+            raise exceptions.InvalidKeyID(keyid)
 
         search_params = {
             'options': 'mr',
@@ -74,8 +75,24 @@ class Server:
 
         param_str = urlencode(search_params)
         search_url = "http://pgp.mit.edu/pks/lookup?" + param_str
+        """
         mr_raw_keydata = urlopen(search_url).read().decode()
-        res = self._parse_mr_res(mr_raw_keydata)
+        res = self._parse_search_overview(mr_raw_keydata)
+        """
+        self._parse_search_overview(sys.stdin.buffer.raw.read().decode())
 
-    def _parse_mr_res(self, res):
-        print(dir(res))
+    def _parse_search_overview(self, res, max_results=5):
+        lines = [x for x in res.splitlines() if x]
+
+        try:
+            info_line_data = lines.pop(0).split(':')
+        except:
+            raise(exceptions.InvalidResponse)
+
+        response_version, result_count = [int(x) for x in info_line_data[1:3]]
+        assert response_version == 1  # currently (2003) this is 1
+
+        if result_count > max_results:
+            raise exceptions.TooManySearchResults(result_count, max_results)
+
+        # TODO: implement parsing of following lines
