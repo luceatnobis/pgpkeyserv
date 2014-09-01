@@ -6,9 +6,12 @@ import socket
 
 from urllib.parse import urlparse, urlencode
 from urllib.request import urlopen
+from urllib.error import HTTPError
 
 from pgpkeyserv import exceptions
 from pgpkeyserv.packages.socks import socks
+
+from pgpkeyserv.packages import pgpparse
 
 socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5, "127.0.0.1", 9050)
 socket.socket = socks.socksocket
@@ -20,11 +23,11 @@ class Server:
     for a key on a keyserver.
     """
 
-    def __init__(self, server="https://pgp.mit.edu", tor=None):
+    def __init__(self, server="http://pgp.mit.edu", tor=None):
         allowed_schemes = ("http", "https", "hkp", "hkps")
         scheme_translation = {"hkp": "http", "hkps": "https"}
 
-        self.abs_path = "pks/lookup"  # standard
+        abs_path = "pks/lookup"  # standard
 
         scheme, netloc, path = urlparse(server)[0:3]
 
@@ -40,7 +43,7 @@ class Server:
         except ValueError:
             url, port = (netloc, 11371)
 
-        self.keyserv_url = "%s://%s:%s" % (scheme, url, port)
+        self.keyserv_url = "%s://%s:%s/%s" % (scheme, url, port, abs_path)
 
     def search(self, keyid):
         """
@@ -64,8 +67,10 @@ class Server:
         keyserver or failing in crippling agony.
         """
         keyid_prefix = "0x"
-        if not keyid.startswith(keyid_prefix):
+        if not keyid.startswith(keyid_prefix) or len(keyid) != 10:
             raise exceptions.InvalidKeyID(keyid)
+
+        raw_keyid = keyid[2:]  # strips the 0x
 
         search_params = {
             'options': 'mr',
@@ -74,14 +79,36 @@ class Server:
         }
 
         param_str = urlencode(search_params)
-        search_url = "http://pgp.mit.edu/pks/lookup?" + param_str
-        """
-        mr_raw_keydata = urlopen(search_url).read().decode()
-        res = self._parse_search_overview(mr_raw_keydata)
-        """
-        self._parse_search_overview(sys.stdin.buffer.raw.read().decode())
+        search_url = self.keyserv_url + '?' + param_str
 
-    def _parse_search_overview(self, res, max_results=5):
+        try:  # urllib throws an exception upon 404. Fantastic.
+            resp = urlopen(search_url)
+        except HTTPError:
+            return
+
+        mr_raw_keydata = resp.read().decode()
+        if not self._parse_search_overview(mr_raw_keydata, raw_keyid):
+            return # TODO: think of something clever here
+
+        key_params = {
+                'options': 'mr',
+                'op': 'get',
+                'search': keyid
+        }
+        key_params_str = urlencode(key_params)
+        key_url = self.keyserv_url + '?' + key_params_str
+
+        # lets get the key
+        try:  # if this goes wrong we have messed up. Horribly. Oh god.
+            key = urlopen(key_url).read()
+        except:
+            print("Plot twist: everything you think you know is a lie.")
+            raise Exception("End of the World in 3..2..1..")
+
+        
+        return pgpparse.key.Key(key)
+
+    def _parse_search_overview(self, res, raw_keyid):
         lines = [x for x in res.splitlines() if x]
 
         try:
@@ -92,7 +119,14 @@ class Server:
         response_version, result_count = [int(x) for x in info_line_data[1:3]]
         assert response_version == 1  # currently (2003) this is 1
 
-        if result_count > max_results:
-            raise exceptions.TooManySearchResults(result_count, max_results)
-
-        # TODO: implement parsing of following lines
+        for line in lines:
+            if "pub" not in line:
+                continue
+            try:
+                _, srv_keyid, algo, keylen, _, _, flags = line.split(":")
+            except ValueError:
+                raise exceptions.InvalidResponse(line)
+            if raw_keyid == srv_keyid:
+                return True
+        else:
+            return None
